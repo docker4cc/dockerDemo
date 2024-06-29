@@ -49,28 +49,44 @@ func readUserCommand() []string {
 
 // 初始化挂载点
 func setUpMount() error {
-	// 首先设置根目录为私有模式，防止影响pivot_root
-	if err := syscall.Mount("/", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
-		return fmt.Errorf("setUpMount Mount proc err: %v", err)
-	}
-
-	// 进入Busybox,固定路径，busybox提前解压好，放到指定的配置路径
-	//err := privotRoot(RootUrl + "/mnt/busybox")
-	err := privotRoot(BusyboxPath)
+    // 设置根目录为私有模式，防止影响 pivot_root
+    if err := syscall.Mount("/", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
+        return fmt.Errorf("setUpMount Mount proc err: %v", err)
+    }
+	// 打印
+    // 进入 busybox, 固定路径，busybox 提前解压好，放到指定的配置路径
+    // err := privotRoot(RootUrl + "/mnt/busybox")
+    
+    // 打印 Busybox 应该存在的绝对路径
+	absoluteBusyboxPath, err := filepath.Abs(BusyboxPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get absolute path of BusyboxPath: %v", err)
 	}
+	log.Infof("busybox absolute path: %s", absoluteBusyboxPath)
+    // 检查 busybox 是否存在
+    if _, err := os.Stat(BusyboxPath); err != nil {
+        return fmt.Errorf("busybox path does not exist: %v", err)
+    }
 
-	// mount proc
-	defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV
-	err = syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), "")
-	if err != nil {
-		log.Errorf("proc挂载 failed: %v", err)
-		return err
-	}
-	syscall.Mount("tmpfs", "/dev", "tempfs", syscall.MS_NOSUID|syscall.MS_STRICTATIME, "mode=755")
-	return nil
+    err = privotRoot(BusyboxPath)
+    if err != nil {
+        return err
+    }
+
+    // 挂载 proc 文件系统
+    syscall.Unmount("/proc", 0)
+    defaultMountFlags := syscall.MS_NOEXEC | syscall.MS_NOSUID | syscall.MS_NODEV
+    err = syscall.Mount("proc", "/proc", "proc", uintptr(defaultMountFlags), "")
+    if err != nil {
+        log.Errorf("proc 挂载失败: %v", err)
+        return err
+    }
+
+    // 挂载 tmpfs 到 /dev 目录
+    syscall.Mount("tmpfs", "/dev", "tmpfs", syscall.MS_NOSUID|syscall.MS_STRICTATIME, "mode=755")
+    return nil
 }
+
 
 func privotRoot(root string) error {
 	pwd, err := os.Getwd()
@@ -79,43 +95,97 @@ func privotRoot(root string) error {
 		return err
 	}
 	log.Infof("current pwd: %s", pwd)
+	log.Infof("privotRoot root: %s", root)  // 添加日志
 
-	// 为了使当前root的老root和新root不在同一个文件系统下，我们把root重新mount一次
-	// bind mount 是把相同的内容换了一个挂载点的挂载方法
-	if err := syscall.Mount(root, root, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-		return fmt.Errorf("mount rootfs to itself error: %v", err)
+	// 确保 root 是绝对路径
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of root: %v", err)
 	}
 
-	// 创建 rootfs、.pivot_root 存储 old_root
+	// 使用 OverlayFS 挂载文件系统
+	upperdir := filepath.Join(root, "upper")
+	workdir := filepath.Join(root, "work")
+	lowerdir := filepath.Join(root, "lower")
+
+	log.Infof("creating upperdir: %s", upperdir)
+	if err := os.MkdirAll(upperdir, 0777); err != nil {
+		return fmt.Errorf("mkdir upperdir err: %v", err)
+	}
+	log.Infof("creating workdir: %s", workdir)
+	if err := os.MkdirAll(workdir, 0777); err != nil {
+		return fmt.Errorf("mkdir workdir err: %v", err)
+	}
+	log.Infof("creating lowerdir: %s", lowerdir)
+	if err := os.MkdirAll(lowerdir, 0777); err != nil {
+		return fmt.Errorf("mkdir lowerdir err: %v", err)
+	}
+
+	// 创建 rootfs/.pivot_root 用于临时存储 old_root
 	pivotDir := filepath.Join(root, ".pivot_root")
-	// 判断当前目录是否已有该文件夹
+	log.Infof("pivotDir: %s", pivotDir)
+
+	// 确保 pivotDir 的父目录存在
+	parentDir := filepath.Dir(pivotDir)
+	if err := os.MkdirAll(parentDir, 0777); err != nil {
+		return fmt.Errorf("mkdir parent dir of pivot_root err: %v", err)
+	}
+
+	// 如果 pivotDir 已经存在，先删除
 	if _, err := os.Stat(pivotDir); err == nil {
-		// 存在则删除
 		if err := os.Remove(pivotDir); err != nil {
 			return err
 		}
 	}
+
+	// 创建 pivotDir
+	log.Infof("creating pivotDir: %s", pivotDir)
 	if err := os.Mkdir(pivotDir, 0777); err != nil {
 		return fmt.Errorf("mkdir of pivot_root err: %v", err)
 	}
+	log.Infof("pivotDir created: %s", pivotDir)
 
-	// pivot_root 到新的rootfs，老的old_root现在挂载在rootfs/.pivot_root上
-	// 挂载点目前依然可以在mount命令中看到
+	// 确保 pivotDir 已经存在
+	if _, err := os.Stat(pivotDir); err != nil {
+		absolutePivotDir, _ := filepath.Abs(pivotDir)
+		log.Errorf("pivotDir does not exist after creation, absolute path: %s", absolutePivotDir)
+		return fmt.Errorf("pivotDir does not exist after creation: %v", err)
+	}
+
+	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir)
+	if err := syscall.Mount("overlay", root, "overlay", 0, options); err != nil {
+		return fmt.Errorf("mount overlay err: %v", err)
+	}
+    // 挂载后再创建一次 pivotDir，确保在新的文件系统视图中存在
+	log.Infof("re-creating pivotDir after mounting overlay: %s", pivotDir)
+	if err := os.Mkdir(pivotDir, 0777); err != nil {
+		return fmt.Errorf("re-create pivot_root err: %v", err)
+	}
+
+	// 再次确保 pivotDir 存在
+	if _, err := os.Stat(pivotDir); err != nil {
+		absolutePivotDir, _ := filepath.Abs(pivotDir)
+		log.Errorf("pivotDir does not exist after mounting overlay, absolute path: %s", absolutePivotDir)
+		return fmt.Errorf("pivotDir does not exist after mounting overlay: %v", err)
+	}
+
+	// pivot_root 到新的 rootfs，老的 old_root 现在挂载在 rootfs/.pivot_root 上
 	log.Infof("root: %s， pivotDir: %s", root, pivotDir)
 	if err := syscall.PivotRoot(root, pivotDir); err != nil {
+		log.Errorf("root path: %s, pivotDir path: %s", root, pivotDir)
 		return fmt.Errorf("pivot_root err: %v", err)
 	}
 
-	// 修改当前工作目录到跟目录
+	// 修改当前工作目录到根目录
 	if err := syscall.Chdir("/"); err != nil {
 		return fmt.Errorf("chdir root err: %v", err)
 	}
 
-	// 取消临时文件.pivot_root的挂载并删除它
-	// 注意当前已经在根目录下，所以临时文件的目录也改变了
+	// 取消临时文件 .pivot_root 的挂载并删除它
 	pivotDir = filepath.Join("/", ".pivot_root")
 	if err := syscall.Unmount(pivotDir, syscall.MNT_DETACH); err != nil {
 		return fmt.Errorf("unmount pivot_root dir err: %v", err)
 	}
 	return os.Remove(pivotDir)
 }
+

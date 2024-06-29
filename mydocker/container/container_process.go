@@ -100,6 +100,16 @@ func createWriteLayer(containerName string) error {
 			return fmt.Errorf("create write layer failed: %v", err)
 		}
 	}
+	workUrl := RootUrl + "/work/" + containerName + "/"
+	exist, err = pathExist(workUrl)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !exist {
+		if err := os.MkdirAll(workUrl, 0777); err != nil {
+			return fmt.Errorf("create work dir failed: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -117,8 +127,21 @@ func createMountPoint(rootUrl, mntUrl, containerName string) error {
 		}
 	}
 	// 把writeLayer和busybox目录mount到mnt目录下
-	dirs := "dirs=" + RootUrl + "/writeLayer:" + rootUrl
-	cmd := exec.Command("mount", "-t", "aufs", "-o", dirs, "none", mountPath)
+	// 使用 OverlayFS 代替 AUFS
+	lowerdir := rootUrl
+	upperdir := RootUrl + "/writeLayer/" + containerName
+	workdir := RootUrl + "/work/" + containerName
+
+	if err := os.MkdirAll(workdir, 0777); err != nil {
+		return fmt.Errorf("mkdir workdir failed: %v", err)
+	}
+
+	dirs := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerdir, upperdir, workdir)
+	cmd := exec.Command("mount", "-t", "overlay", "overlay", "-o", dirs, mountPath)
+	
+	
+	// dirs := "dirs=" + RootUrl + "/writeLayer:" + rootUrl
+	// cmd := exec.Command("mount", "-t", "aufs", "-o", dirs, "none", mountPath)
 	log.Infof(cmd.String())
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

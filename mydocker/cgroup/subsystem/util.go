@@ -9,7 +9,38 @@ import (
 	"strings"
 )
 
+// CheckCgroupVersion 检查系统使用的是 cgroup v1 还是 cgroup v2
+func CheckCgroupVersion() (string, error) {
+	f, err := os.Open("/proc/filesystems")
+	if err != nil {
+		return "", fmt.Errorf("open /proc/filesystems err: %v", err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		txt := scanner.Text()
+		if strings.Contains(txt, "cgroup2") {
+			return "cgroup2", nil
+		}
+	}
+	return "cgroup", nil
+}
+
 func FindCgroupMountPoint(subSystem string) (string, error) {
+	cgroupVersion, err := CheckCgroupVersion()
+	if err != nil {
+		return "", err
+	}
+	log.Infof("cgroup version: %s", cgroupVersion)
+	if cgroupVersion == "cgroup2" {
+		// cgroup v2 使用统一的挂载点
+		// 打印cgroup v2的挂载点：mount | grep cgroup2
+		log.Infof("cgroup v2 mount point: /sys/fs/cgroup")
+		return "/sys/fs/cgroup", nil
+	}
+
+	// cgroup v1 查找挂载点
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return "", fmt.Errorf("open /proc/self/mountinfo err: %v", err)

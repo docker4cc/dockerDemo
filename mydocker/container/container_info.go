@@ -18,5 +18,5 @@ var (
 	ConfigName          = "config.json"
 	ContainerLogFile    = "container.log"
 	RootUrl             = "/var/lib/mydocker/container"
-	BusyboxPath         = "/opt/busybox"
+	BusyboxPath         = "../busybox"
 )
